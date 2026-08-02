@@ -34,10 +34,19 @@ jobs:
         run: |
           rm -f $TAR_NAME
           if [ "${{ env.UPLOAD_NODE_MODULES }}" = "true" ]; then
-            tar -czf $TAR_NAME .next node_modules public package.json next.config.* package-lock.json || tar -czf $TAR_NAME .next node_modules public package.json next.config.* || true
+            tar -czf $TAR_NAME .next node_modules public package.json next.config.ts package-lock.json
           else
-            tar -czf $TAR_NAME .next public package.json next.config.* package-lock.json || true
+            tar -czf $TAR_NAME .next public package.json next.config.ts package-lock.json
           fi
+        env:
+          TAR_NAME: ${{ env.TAR_NAME }}
+
+      - name: Verify tarball contents
+        run: |
+          ls -lh $TAR_NAME
+          echo "node_modules entries:"
+          tar -tzf $TAR_NAME | grep node_modules | wc -l
+          tar -tzf $TAR_NAME | grep node_modules | head -5
         env:
           TAR_NAME: ${{ env.TAR_NAME }}
 
@@ -62,14 +71,29 @@ jobs:
             set -e
             TARGET_DIR='${{ secrets.TARGET_DIR }}'
             BACKUP_DIR="${TARGET_DIR}.bak.$(date +%s)"
+
+            if [ -f "$TARGET_DIR/.htaccess" ]; then
+              cp "$TARGET_DIR/.htaccess" /tmp/htaccess.bak
+            fi
+
             if [ -d "$TARGET_DIR" ]; then
               mv "$TARGET_DIR" "$BACKUP_DIR"
             fi
             mkdir -p "$TARGET_DIR"
             tar -xzf /home/${{ secrets.SSH_USER }}/${{ env.TAR_NAME }} -C "$TARGET_DIR"
             chown -R ${{ secrets.SSH_USER }}:${{ secrets.SSH_USER }} "$TARGET_DIR"
-            if [ -x "/home/${{ secrets.SSH_USER }}/nodevenv/$(basename $TARGET_DIR)/22/bin/npm" ]; then
-              /home/${{ secrets.SSH_USER }}/nodevenv/$(basename $TARGET_DIR)/22/bin/npm --prefix "$TARGET_DIR" run start || true
-            else
-              (cd "$TARGET_DIR" && nohup npm start > /dev/null 2>&1 &) || true
+
+            if [ -f /tmp/htaccess.bak ]; then
+              cp /tmp/htaccess.bak "$TARGET_DIR/.htaccess"
+            elif [ -f "$BACKUP_DIR/.htaccess" ]; then
+              cp "$BACKUP_DIR/.htaccess" "$TARGET_DIR/.htaccess"
             fi
+
+            NPM_BIN="/home/${{ secrets.SSH_USER }}/nodevenv/$(basename $TARGET_DIR)/22/bin/npm"
+
+            if [ ! -d "$TARGET_DIR/node_modules" ] && [ -x "$NPM_BIN" ]; then
+              (cd "$TARGET_DIR" && "$NPM_BIN" install --omit=dev)
+            fi
+
+            mkdir -p "$TARGET_DIR/tmp"
+            touch "$TARGET_DIR/tmp/restart.txt"
