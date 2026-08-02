@@ -1,0 +1,75 @@
+name: Build and Deploy to cPanel server for agm-academy.com
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: 22
+  TAR_NAME: agm-academy-prod.tar.gz
+  UPLOAD_NODE_MODULES: ${{ secrets.UPLOAD_NODE_MODULES || 'true' }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Create production tarball
+        run: |
+          rm -f $TAR_NAME
+          if [ "${{ env.UPLOAD_NODE_MODULES }}" = "true" ]; then
+            tar -czf $TAR_NAME .next node_modules public package.json next.config.* package-lock.json || tar -czf $TAR_NAME .next node_modules public package.json next.config.* || true
+          else
+            tar -czf $TAR_NAME .next public package.json next.config.* package-lock.json || true
+          fi
+        env:
+          TAR_NAME: ${{ env.TAR_NAME }}
+
+      - name: Copy tarball to server
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: ${{ env.TAR_NAME }}
+          target: /home/${{ secrets.SSH_USER }}/
+
+      - name: Extract on server and deploy
+        uses: appleboy/ssh-action@v0.1.8
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            TARGET_DIR='${{ secrets.TARGET_DIR }}'
+            BACKUP_DIR="${TARGET_DIR}.bak.$(date +%s)"
+            if [ -d "$TARGET_DIR" ]; then
+              mv "$TARGET_DIR" "$BACKUP_DIR"
+            fi
+            mkdir -p "$TARGET_DIR"
+            tar -xzf /home/${{ secrets.SSH_USER }}/${{ env.TAR_NAME }} -C "$TARGET_DIR"
+            chown -R ${{ secrets.SSH_USER }}:${{ secrets.SSH_USER }} "$TARGET_DIR"
+            if [ -x "/home/${{ secrets.SSH_USER }}/nodevenv/$(basename $TARGET_DIR)/22/bin/npm" ]; then
+              /home/${{ secrets.SSH_USER }}/nodevenv/$(basename $TARGET_DIR)/22/bin/npm --prefix "$TARGET_DIR" run start || true
+            else
+              (cd "$TARGET_DIR" && nohup npm start > /dev/null 2>&1 &) || true
+            fi
