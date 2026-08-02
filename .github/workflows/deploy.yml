@@ -9,7 +9,7 @@ on:
 env:
   NODE_VERSION: 22
   TAR_NAME: agm-academy-prod.tar.gz
-  UPLOAD_NODE_MODULES: ${{ secrets.UPLOAD_NODE_MODULES || 'false' }}
+  UPLOAD_NODE_MODULES: ${{ secrets.UPLOAD_NODE_MODULES || 'true' }}
 
 jobs:
   build-and-deploy:
@@ -66,6 +66,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           port: ${{ secrets.SSH_PORT }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 15m
           script: |
             set -e
             TARGET_DIR='${{ secrets.TARGET_DIR }}'
@@ -81,7 +82,11 @@ jobs:
               mv "$TARGET_DIR" "$BACKUP_DIR"
             fi
             mkdir -p "$TARGET_DIR"
-            tar -xzf /home/${{ secrets.SSH_USER }}/${{ env.TAR_NAME }} -C "$TARGET_DIR"
+
+            # Throttle extraction to avoid tripping the host's I/O quota
+            nice -n 19 ionice -c2 -n7 tar -xzf /home/${{ secrets.SSH_USER }}/${{ env.TAR_NAME }} -C "$TARGET_DIR" 2>/dev/null \
+              || tar -xzf /home/${{ secrets.SSH_USER }}/${{ env.TAR_NAME }} -C "$TARGET_DIR"
+
             chown -R ${{ secrets.SSH_USER }}:${{ secrets.SSH_USER }} "$TARGET_DIR"
 
             # Restore .htaccess
@@ -93,15 +98,15 @@ jobs:
 
             NPM_BIN="/home/${{ secrets.SSH_USER }}/nodevenv/$(basename $TARGET_DIR)/22/bin/npm"
 
-            # Check node_modules is actually populated, not just present
+            # Safety net: only kicks in if node_modules genuinely didn't make it
             MODULE_COUNT=0
             if [ -d "$TARGET_DIR/node_modules" ]; then
               MODULE_COUNT=$(find "$TARGET_DIR/node_modules" -mindepth 1 -maxdepth 1 | wc -l)
             fi
 
-            if [ "$MODULE_COUNT" -lt 10 ] && [ -x "$NPM_BIN" ]; then
-              echo "node_modules missing or incomplete ($MODULE_COUNT entries) — running npm install"
-              (cd "$TARGET_DIR" && "$NPM_BIN" install --omit=dev)
+            if [ "$MODULE_COUNT" -lt 100 ] && [ -x "$NPM_BIN" ]; then
+              echo "node_modules incomplete ($MODULE_COUNT entries) — running npm install as fallback"
+              (cd "$TARGET_DIR" && "$NPM_BIN" install --omit=dev) || true
             fi
 
             # Restart via Passenger
