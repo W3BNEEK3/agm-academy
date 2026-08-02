@@ -25,7 +25,7 @@ const HEADER = [
   "created_at",
 ];
 
-function escapeCsvField(value: string | number) {
+function escapeCsvField(value: string | number | bigint) {
   const str = String(value);
   if (/[",\n]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
