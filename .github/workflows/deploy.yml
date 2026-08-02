@@ -9,7 +9,7 @@ on:
 env:
   NODE_VERSION: 22
   TAR_NAME: agm-academy-prod.tar.gz
-  UPLOAD_NODE_MODULES: ${{ secrets.UPLOAD_NODE_MODULES || 'true' }}
+  UPLOAD_NODE_MODULES: ${{ secrets.UPLOAD_NODE_MODULES || 'false' }}
 
 jobs:
   build-and-deploy:
@@ -45,8 +45,7 @@ jobs:
         run: |
           ls -lh $TAR_NAME
           echo "node_modules entries:"
-          tar -tzf $TAR_NAME | grep node_modules | wc -l
-          tar -tzf $TAR_NAME | grep node_modules | head -5
+          tar -tzf $TAR_NAME | grep node_modules | wc -l || true
         env:
           TAR_NAME: ${{ env.TAR_NAME }}
 
@@ -72,10 +71,12 @@ jobs:
             TARGET_DIR='${{ secrets.TARGET_DIR }}'
             BACKUP_DIR="${TARGET_DIR}.bak.$(date +%s)"
 
+            # Preserve .htaccess across deploys
             if [ -f "$TARGET_DIR/.htaccess" ]; then
               cp "$TARGET_DIR/.htaccess" /tmp/htaccess.bak
             fi
 
+            # Move current app to a fresh backup
             if [ -d "$TARGET_DIR" ]; then
               mv "$TARGET_DIR" "$BACKUP_DIR"
             fi
@@ -83,6 +84,7 @@ jobs:
             tar -xzf /home/${{ secrets.SSH_USER }}/${{ env.TAR_NAME }} -C "$TARGET_DIR"
             chown -R ${{ secrets.SSH_USER }}:${{ secrets.SSH_USER }} "$TARGET_DIR"
 
+            # Restore .htaccess
             if [ -f /tmp/htaccess.bak ]; then
               cp /tmp/htaccess.bak "$TARGET_DIR/.htaccess"
             elif [ -f "$BACKUP_DIR/.htaccess" ]; then
@@ -91,9 +93,20 @@ jobs:
 
             NPM_BIN="/home/${{ secrets.SSH_USER }}/nodevenv/$(basename $TARGET_DIR)/22/bin/npm"
 
-            if [ ! -d "$TARGET_DIR/node_modules" ] && [ -x "$NPM_BIN" ]; then
+            # Check node_modules is actually populated, not just present
+            MODULE_COUNT=0
+            if [ -d "$TARGET_DIR/node_modules" ]; then
+              MODULE_COUNT=$(find "$TARGET_DIR/node_modules" -mindepth 1 -maxdepth 1 | wc -l)
+            fi
+
+            if [ "$MODULE_COUNT" -lt 10 ] && [ -x "$NPM_BIN" ]; then
+              echo "node_modules missing or incomplete ($MODULE_COUNT entries) — running npm install"
               (cd "$TARGET_DIR" && "$NPM_BIN" install --omit=dev)
             fi
 
+            # Restart via Passenger
             mkdir -p "$TARGET_DIR/tmp"
             touch "$TARGET_DIR/tmp/restart.txt"
+
+            # Keep only the most recent backup to avoid disk/I-O buildup
+            ls -dt "${TARGET_DIR}".bak.* 2>/dev/null | tail -n +2 | xargs -r rm -rf
