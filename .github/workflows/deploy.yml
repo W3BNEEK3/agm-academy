@@ -9,7 +9,7 @@ on:
 env:
   NODE_VERSION: 22
   TAR_NAME: agm-academy-prod.tar.gz
-  UPLOAD_NODE_MODULES: ${{ secrets.UPLOAD_NODE_MODULES || 'true' }}
+  UPLOAD_NODE_MODULES: ${{ secrets.UPLOAD_NODE_MODULES || 'false' }}
 
 jobs:
   build-and-deploy:
@@ -73,46 +73,30 @@ jobs:
             TARGET_DIR='${{ secrets.TARGET_DIR }}'
             BACKUP_DIR="${TARGET_DIR}.bak.$(date +%s)"
 
-            # Preserve .htaccess across deploys
             if [ -f "$TARGET_DIR/.htaccess" ]; then
               cp "$TARGET_DIR/.htaccess" /tmp/htaccess.bak
             fi
 
-            # Move current app to a fresh backup
             if [ -d "$TARGET_DIR" ]; then
               mv "$TARGET_DIR" "$BACKUP_DIR"
             fi
             mkdir -p "$TARGET_DIR"
 
-            # Throttle extraction to avoid tripping the host's I/O and process quotas
-            nice -n 19 ionice -c2 -n7 tar -xzf /home/$SSH_USER/${{ env.TAR_NAME }} -C "$TARGET_DIR" 2>/dev/null \
-              || tar -xzf /home/$SSH_USER/${{ env.TAR_NAME }} -C "$TARGET_DIR"
+            nice -n 19 ionice -c2 -n7 tar -xzf /home/$SSH_USER/${{ env.TAR_NAME }} -C "$TARGET_DIR"
 
-            # Restore .htaccess
             if [ -f /tmp/htaccess.bak ]; then
               cp /tmp/htaccess.bak "$TARGET_DIR/.htaccess"
             elif [ -f "$BACKUP_DIR/.htaccess" ]; then
               cp "$BACKUP_DIR/.htaccess" "$TARGET_DIR/.htaccess"
             fi
 
-            # Compute the app's path relative to nodevenv (mirrors domains/... structure)
             APP_REL_PATH="${TARGET_DIR#/home/$SSH_USER/}"
             NPM_BIN="/home/$SSH_USER/nodevenv/${APP_REL_PATH}/22/bin/npm"
 
-            # Safety net: only kicks in if node_modules genuinely didn't make it
-            MODULE_COUNT=0
-            if [ -d "$TARGET_DIR/node_modules" ]; then
-              MODULE_COUNT=$(find "$TARGET_DIR/node_modules" -mindepth 1 -maxdepth 1 | wc -l)
-            fi
+            echo "Installing production dependencies on server..."
+            (cd "$TARGET_DIR" && nice -n 19 "$NPM_BIN" install --omit=dev --no-audit --no-fund)
 
-            if [ "$MODULE_COUNT" -lt 100 ] && [ -x "$NPM_BIN" ]; then
-              echo "node_modules incomplete ($MODULE_COUNT entries) — running npm install as fallback (production only, no build)"
-              (cd "$TARGET_DIR" && "$NPM_BIN" install --omit=dev) || true
-            fi
-
-            # Restart the Node app (LiteSpeed lsnode watches this file, same convention as Passenger)
             mkdir -p "$TARGET_DIR/tmp"
             touch "$TARGET_DIR/tmp/restart.txt"
 
-            # Keep only the most recent backup to avoid disk/process buildup
-            ls -dt "${TARGET_DIR}".bak.* 2>/dev/null | tail -n +2 | xargs
+            ls -dt "${TARGET_DIR}".bak.* 2>/dev/null | tail -n +2 | xargs -r rm -rf
