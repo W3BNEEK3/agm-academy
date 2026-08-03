@@ -1,4 +1,4 @@
-name: Build and Deploy to cPanel server for agm-academy.com
+name: Build and Deploy to DirectAdmin server for agmacademy.co
 
 on:
   push:
@@ -25,10 +25,10 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --include=dev
 
       - name: Build
-        run: npm run build
+        run: npx next build --webpack
 
       - name: Create production tarball
         run: |
@@ -55,7 +55,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           port: ${{ secrets.SSH_PORT }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          password: ${{ secrets.SSH_PASSWORD }}
           source: ${{ env.TAR_NAME }}
           target: /home/${{ secrets.SSH_USER }}/
 
@@ -65,10 +65,11 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           port: ${{ secrets.SSH_PORT }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          password: ${{ secrets.SSH_PASSWORD }}
           command_timeout: 15m
           script: |
             set -e
+            SSH_USER='${{ secrets.SSH_USER }}'
             TARGET_DIR='${{ secrets.TARGET_DIR }}'
             BACKUP_DIR="${TARGET_DIR}.bak.$(date +%s)"
 
@@ -83,11 +84,9 @@ jobs:
             fi
             mkdir -p "$TARGET_DIR"
 
-            # Throttle extraction to avoid tripping the host's I/O quota
-            nice -n 19 ionice -c2 -n7 tar -xzf /home/${{ secrets.SSH_USER }}/${{ env.TAR_NAME }} -C "$TARGET_DIR" 2>/dev/null \
-              || tar -xzf /home/${{ secrets.SSH_USER }}/${{ env.TAR_NAME }} -C "$TARGET_DIR"
-
-            chown -R ${{ secrets.SSH_USER }}:${{ secrets.SSH_USER }} "$TARGET_DIR"
+            # Throttle extraction to avoid tripping the host's I/O and process quotas
+            nice -n 19 ionice -c2 -n7 tar -xzf /home/$SSH_USER/${{ env.TAR_NAME }} -C "$TARGET_DIR" 2>/dev/null \
+              || tar -xzf /home/$SSH_USER/${{ env.TAR_NAME }} -C "$TARGET_DIR"
 
             # Restore .htaccess
             if [ -f /tmp/htaccess.bak ]; then
@@ -96,7 +95,9 @@ jobs:
               cp "$BACKUP_DIR/.htaccess" "$TARGET_DIR/.htaccess"
             fi
 
-            NPM_BIN="/home/${{ secrets.SSH_USER }}/nodevenv/$(basename $TARGET_DIR)/22/bin/npm"
+            # Compute the app's path relative to nodevenv (mirrors domains/... structure)
+            APP_REL_PATH="${TARGET_DIR#/home/$SSH_USER/}"
+            NPM_BIN="/home/$SSH_USER/nodevenv/${APP_REL_PATH}/22/bin/npm"
 
             # Safety net: only kicks in if node_modules genuinely didn't make it
             MODULE_COUNT=0
@@ -105,13 +106,13 @@ jobs:
             fi
 
             if [ "$MODULE_COUNT" -lt 100 ] && [ -x "$NPM_BIN" ]; then
-              echo "node_modules incomplete ($MODULE_COUNT entries) — running npm install as fallback"
+              echo "node_modules incomplete ($MODULE_COUNT entries) — running npm install as fallback (production only, no build)"
               (cd "$TARGET_DIR" && "$NPM_BIN" install --omit=dev) || true
             fi
 
-            # Restart via Passenger
+            # Restart the Node app (LiteSpeed lsnode watches this file, same convention as Passenger)
             mkdir -p "$TARGET_DIR/tmp"
             touch "$TARGET_DIR/tmp/restart.txt"
 
-            # Keep only the most recent backup to avoid disk/I-O buildup
-            ls -dt "${TARGET_DIR}".bak.* 2>/dev/null | tail -n +2 | xargs -r rm -rf
+            # Keep only the most recent backup to avoid disk/process buildup
+            ls -dt "${TARGET_DIR}".bak.* 2>/dev/null | tail -n +2 | xargs
