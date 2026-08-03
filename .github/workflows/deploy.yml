@@ -96,6 +96,11 @@ jobs:
             echo "Installing production dependencies on server..."
             (cd "$TARGET_DIR" && nice -n 19 "$NPM_BIN" install --omit=dev --no-audit --no-fund)
 
+            VENV_MODULES="/home/$SSH_USER/nodevenv/${APP_REL_PATH}/22/lib/node_modules"
+            if [ ! -e "$TARGET_DIR/node_modules" ]; then
+              ln -s "$VENV_MODULES" "$TARGET_DIR/node_modules"
+            fi
+
             mkdir -p "$TARGET_DIR/tmp"
             touch "$TARGET_DIR/tmp/restart.txt"
 
